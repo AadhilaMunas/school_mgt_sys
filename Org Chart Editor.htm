@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html><head>
+        <meta http-equiv="content-type" content="text/html; charset=UTF-8">
+        <title>Org Chart Editor*</title>
+        <meta name="description" content="An organization chart editor -- edit details and change relationships.">
+        <!-- Copyright 1998-2016 by Northwoods Software Corporation. -->
+        <meta charset="UTF-8">
+        <script src="tree/analytics.js" async=""></script><script src="tree/go.js"></script><script src="tree/go_002.js"></script>
+        <link href="tree/goSamples.css" rel="stylesheet" type="text/css">  <!-- you don't need to use this -->
+        <script src="tree/goSamples.js"></script><script src="tree/highlight.js"></script><link href="tree/highlight.css" rel="stylesheet" type="text/css">  <!-- this is only for the GoJS Samples framework -->
+
+        <link rel="stylesheet" href="tree/dataInspector.css">
+        <script src="tree/dataInspector.js"></script>
+
+        <script id="code">
+            var nodeIdCounter = -1; // use a sequence to guarantee key uniqueness as we add/remove/modify nodes
+
+            function init() {
+                if (window.goSamples)
+                    goSamples();  // init for these samples -- you don't need to call this
+                var $ = go.GraphObject.make;  // for conciseness in defining templates
+
+                myDiagram =
+                        $(go.Diagram, "myDiagramDiv", // must be the ID or reference to div
+                                {
+                                    initialContentAlignment: go.Spot.Center,
+                                    maxSelectionCount: 1, // users can select only one part at a time
+                                    validCycle: go.Diagram.CycleDestinationTree, // make sure users can only create trees
+                                    "clickCreatingTool.archetypeNodeData": {}, // allow double-click in background to create a new node
+                                    "clickCreatingTool.insertPart": function(loc) {  // customize the data for the new node
+                                        this.archetypeNodeData = {
+                                            key: getNextKey(), // assign the key based on the number of nodes
+                                            name: "(new person)",
+                                            title: ""
+                                        };
+                                        return go.ClickCreatingTool.prototype.insertPart.call(this, loc);
+                                    },
+                                    layout:
+                                            $(go.TreeLayout,
+                                                    {
+                                                        treeStyle: go.TreeLayout.StyleLastParents,
+                                                        arrangement: go.TreeLayout.ArrangementHorizontal,
+                                                        // properties for most of the tree:
+                                                        angle: 90,
+                                                        layerSpacing: 35,
+                                                        // properties for the "last parents":
+                                                        alternateAngle: 90,
+                                                        alternateLayerSpacing: 35,
+                                                        alternateAlignment: go.TreeLayout.AlignmentBus,
+                                                        alternateNodeSpacing: 20
+                                                    }),
+                                    "undoManager.isEnabled": true // enable undo & redo
+                                });
+
+                // when the document is modified, add a "*" to the title and enable the "Save" button
+                myDiagram.addDiagramListener("Modified", function(e) {
+                    var button = document.getElementById("SaveButton");
+                    if (button)
+                        button.disabled = !myDiagram.isModified;
+                    var idx = document.title.indexOf("*");
+                    if (myDiagram.isModified) {
+                        if (idx < 0)
+                            document.title += "*";
+                    } else {
+                        if (idx >= 0)
+                            document.title = document.title.substr(0, idx);
+                    }
+                });
+
+                // manage boss info manually when a node or link is deleted from the diagram
+                myDiagram.addDiagramListener("SelectionDeleting", function(e) {
+                    var part = e.subject.first(); // e.subject is the myDiagram.selection collection,
+                    // so we'll get the first since we know we only have one selection
+                    myDiagram.startTransaction("clear boss");
+                    if (part instanceof go.Node) {
+                        var it = part.findTreeChildrenNodes(); // find all child nodes
+                        while (it.next()) { // now iterate through them and clear out the boss information
+                            var child = it.value;
+                            var bossText = child.findObject("boss"); // since the boss TextBlock is named, we can access it by name
+                            if (bossText === null)
+                                return;
+                            bossText.text = undefined;
+                        }
+                    } else if (part instanceof go.Link) {
+                        var child = part.toNode;
+                        var bossText = child.findObject("boss"); // since the boss TextBlock is named, we can access it by name
+                        if (bossText === null)
+                            return;
+                        bossText.text = undefined;
+                    }
+                    myDiagram.commitTransaction("clear boss");
+                });
+
+                var levelColors = ["#AC193D/#BF1E4B", "#2672EC/#2E8DEF", "#8C0095/#A700AE", "#5133AB/#643EBF",
+                    "#008299/#00A0B1", "#D24726/#DC572E", "#008A00/#00A600", "#094AB2/#0A5BC4"];
+
+                // override TreeLayout.commitNodes to also modify the background brush based on the tree depth level
+                myDiagram.layout.commitNodes = function() {
+                    go.TreeLayout.prototype.commitNodes.call(myDiagram.layout);  // do the standard behavior
+                    // then go through all of the vertexes and set their corresponding node's Shape.fill
+                    // to a brush dependent on the TreeVertex.level value
+                    myDiagram.layout.network.vertexes.each(function(v) {
+                        if (v.node) {
+                            var level = v.level % (levelColors.length);
+                            var colors = levelColors[level].split("/");
+                            var shape = v.node.findObject("SHAPE");
+                            if (shape)
+                                shape.fill = $(go.Brush, "Linear", {0: colors[0], 1: colors[1], start: go.Spot.Left, end: go.Spot.Right});
+                        }
+                    });
+                };
+
+                // This function is used to find a suitable ID when modifying/creating nodes.
+                // We used the counter combined with findNodeDataForKey to ensure uniqueness.
+                function getNextKey() {
+                    var key = nodeIdCounter;
+                    while (myDiagram.model.findNodeDataForKey(key.toString()) !== null) {
+                        key = nodeIdCounter -= 1;
+                    }
+                    return key.toString();
+                }
+
+                // when a node is double-clicked, add a child to it
+                function nodeDoubleClick(e, obj) {
+                    var clicked = obj.part;
+                    if (clicked !== null) {
+                        var thisemp = clicked.data;
+                        myDiagram.startTransaction("add employee");
+                        var nextkey = getNextKey();
+                        var newemp = {key: nextkey, name: "(new person)", title: "", parent: thisemp.key};
+                        myDiagram.model.addNodeData(newemp);
+                        myDiagram.commitTransaction("add employee");
+                    }
+                }
+
+                // this is used to determine feedback during drags
+                function mayWorkFor(node1, node2) {
+                    if (!(node1 instanceof go.Node))
+                        return false;  // must be a Node
+                    if (node1 === node2)
+                        return false;  // cannot work for yourself
+                    if (node2.isInTreeOf(node1))
+                        return false;  // cannot work for someone who works for you
+                    return true;
+                }
+
+                // This function provides a common style for most of the TextBlocks.
+                // Some of these values may be overridden in a particular TextBlock.
+                function textStyle() {
+                    return {font: "9pt  Segoe UI,sans-serif", stroke: "white"};
+                }
+
+                // This converter is used by the Picture.
+                function findHeadShot(key) {
+                    if (key < 0 || key > 16)
+                        return "images/HSnopic.png"; // There are only 16 images on the server
+                    return "images/HS" + key + ".png"
+                }
+
+                // define the Node template
+                myDiagram.nodeTemplate =
+                        $(go.Node, "Auto",
+                                {doubleClick: nodeDoubleClick},
+                        {// handle dragging a Node onto a Node to (maybe) change the reporting relationship
+                            mouseDragEnter: function(e, node, prev) {
+                                var diagram = node.diagram;
+                                var selnode = diagram.selection.first();
+                                if (!mayWorkFor(selnode, node))
+                                    return;
+                                var shape = node.findObject("SHAPE");
+                                if (shape) {
+                                    shape._prevFill = shape.fill;  // remember the original brush
+                                    shape.fill = "darkred";
+                                }
+                            },
+                            mouseDragLeave: function(e, node, next) {
+                                var shape = node.findObject("SHAPE");
+                                if (shape && shape._prevFill) {
+                                    shape.fill = shape._prevFill;  // restore the original brush
+                                }
+                            },
+                            mouseDrop: function(e, node) {
+                                var diagram = node.diagram;
+                                var selnode = diagram.selection.first();  // assume just one Node in selection
+                                if (mayWorkFor(selnode, node)) {
+                                    // find any existing link into the selected node
+                                    var link = selnode.findTreeParentLink();
+                                    if (link !== null) {  // reconnect any existing link
+                                        link.fromNode = node;
+                                    } else {  // else create a new link
+                                        diagram.toolManager.linkingTool.insertLink(node, node.port, selnode, selnode.port);
+                                    }
+                                }
+                            }
+                        },
+                        // for sorting, have the Node.text be the data.name
+                        new go.Binding("text", "name"),
+                                // bind the Part.layerName to control the Node's layer depending on whether it isSelected
+                                new go.Binding("layerName", "isSelected", function(sel) {
+                                    return sel ? "Foreground" : "";
+                                }).ofObject(),
+                                // define the node's outer shape
+                                $(go.Shape, "Rectangle",
+                                        {
+                                            name: "SHAPE", fill: "white", stroke: null,
+                                            // set the port properties:
+                                            portId: "", fromLinkable: true, toLinkable: true, cursor: "pointer"
+                                        }),
+                                $(go.Panel, "Horizontal",
+                                        $(go.Picture,
+                                                {
+                                                    name: 'Picture',
+                                                    desiredSize: new go.Size(39, 50),
+                                                    margin: new go.Margin(6, 8, 6, 10),
+                                                },
+                                                new go.Binding("source", "key", findHeadShot)),
+                                        // define the panel where the text will appear
+                                        $(go.Panel, "Table",
+                                                {
+                                                    maxSize: new go.Size(150, 999),
+                                                    margin: new go.Margin(6, 10, 0, 3),
+                                                    defaultAlignment: go.Spot.Left
+                                                },
+                                        $(go.RowColumnDefinition, {column: 2, width: 4}),
+                                                $(go.TextBlock, textStyle(), // the name
+                                                        {
+                                                            row: 0, column: 0, columnSpan: 5,
+                                                            font: "12pt Segoe UI,sans-serif",
+                                                            editable: true, isMultiline: false,
+                                                            minSize: new go.Size(10, 16)
+                                                        },
+                                                new go.Binding("text", "name").makeTwoWay()),
+                                                $(go.TextBlock, "Title: ", textStyle(),
+                                                        {row: 1, column: 0}),
+                                                $(go.TextBlock, textStyle(),
+                                                        {
+                                                            row: 1, column: 1, columnSpan: 4,
+                                                            editable: true, isMultiline: false,
+                                                            minSize: new go.Size(10, 14),
+                                                            margin: new go.Margin(0, 0, 0, 3)
+                                                        },
+                                                new go.Binding("text", "title").makeTwoWay()),
+                                                $(go.TextBlock, textStyle(),
+                                                        {row: 2, column: 0},
+                                                new go.Binding("text", "key", function(v) {
+                                                    return "ID: " + v;
+                                                })),
+                                                $(go.TextBlock, textStyle(),
+                                                        {name: "boss", row: 2, column: 3, }, // we include a name so we can access this TextBlock when deleting Nodes/Links
+                                                        new go.Binding("text", "parent", function(v) {
+                                                            return "Boss: " + v;
+                                                        })),
+                                                $(go.TextBlock, textStyle(), // the comments
+                                                        {
+                                                            row: 3, column: 0, columnSpan: 5,
+                                                            font: "italic 9pt sans-serif",
+                                                            wrap: go.TextBlock.WrapFit,
+                                                            editable: true, // by default newlines are allowed
+                                                            minSize: new go.Size(10, 14)
+                                                        },
+                                                new go.Binding("text", "comments").makeTwoWay())
+                                                )  // end Table Panel
+                                        ) // end Horizontal Panel
+                                );  // end Node
+
+                // the context menu allows users to make a position vacant,
+                // remove a role and reassign the subtree, or remove a department
+                myDiagram.nodeTemplate.contextMenu =
+                        $(go.Adornment, "Vertical",
+                                $("ContextMenuButton",
+                                        $(go.TextBlock, "Vacate Position"),
+                                        {
+                                            click: function(e, obj) {
+                                                var node = obj.part.adornedPart;
+                                                if (node !== null) {
+                                                    var thisemp = node.data;
+                                                    myDiagram.startTransaction("vacate");
+                                                    // update the key, name, and comments
+                                                    myDiagram.model.setKeyForNodeData(thisemp, getNextKey());
+                                                    myDiagram.model.setDataProperty(thisemp, "name", "(Vacant)");
+                                                    myDiagram.model.setDataProperty(thisemp, "comments", "");
+                                                    myDiagram.commitTransaction("vacate");
+                                                }
+                                            }
+                                        }
+                                ),
+                                $("ContextMenuButton",
+                                        $(go.TextBlock, "Remove Role"),
+                                        {
+                                            click: function(e, obj) {
+                                                // reparent the subtree to this node's boss, then remove the node
+                                                var node = obj.part.adornedPart;
+                                                if (node !== null) {
+                                                    myDiagram.startTransaction("reparent remove");
+                                                    var chl = node.findTreeChildrenNodes();
+                                                    // iterate through the children and set their parent key to our selected node's parent key
+                                                    while (chl.next()) {
+                                                        var emp = chl.value;
+                                                        myDiagram.model.setParentKeyForNodeData(emp.data, node.findTreeParentNode().data.key);
+                                                    }
+                                                    // and now remove the selected node itself
+                                                    myDiagram.model.removeNodeData(node.data);
+                                                    myDiagram.commitTransaction("reparent remove");
+                                                }
+                                            }
+                                        }
+                                ),
+                                $("ContextMenuButton",
+                                        $(go.TextBlock, "Remove Department"),
+                                        {
+                                            click: function(e, obj) {
+                                                // remove the whole subtree, including the node itself
+                                                var node = obj.part.adornedPart;
+                                                if (node !== null) {
+                                                    myDiagram.startTransaction("remove dept");
+                                                    myDiagram.removeParts(node.findTreeParts());
+                                                    myDiagram.commitTransaction("remove dept");
+                                                }
+                                            }
+                                        }
+                                )
+                                );
+
+                // define the Link template
+                myDiagram.linkTemplate =
+                        $(go.Link, go.Link.Orthogonal,
+                                {corner: 5, relinkableFrom: true, relinkableTo: true},
+                        $(go.Shape, {strokeWidth: 4, stroke: "#00a4a4"}));  // the link shape
+
+                // read in the JSON-format data from the "mySavedModel" element
+                load();
+
+
+                // support editing the properties of the selected person in HTML
+                if (window.Inspector)
+                    myInspector = new Inspector('myInspector', myDiagram,
+                            {
+                                properties: {
+                                    'key': {readOnly: true},
+                                    'comments': {}
+                                }
+                            });
+            }
+
+            // Show the diagram's model in JSON format
+            function save() {
+                document.getElementById("mySavedModel").value = myDiagram.model.toJson();
+                myDiagram.isModified = false;
+            }
+            function load() {
+                myDiagram.model = go.Model.fromJson(document.getElementById("mySavedModel").value);
+            }
+        </script>
+        <style></style></head>
+    <body onload="init()"><div id="menu">  <ul id="sections">   
+                <li><a href="https://gojs.net/latest/samples/index.html"><h2 class="index">
+                            <span class="glyphicon glyphicon-th"></span>Index</h2></a></li>   
+                            <li><a href="https://gojs.net/latest/samples/minimal.html">Minimal<span class="samplespan"><img src="tree/minimal.png" height="200"></span></a></li>    
+                            <!--<li><a href="minimalJSON.html">Minimal (JSON)</a></li>-->    <!--<li><a href="minimalXML.html">Minimal (XML)</a></li>-->    <!--<li><a href="require.html">Using RequireJS</a></li>-->    <!--<li><a href="angular.html">Using AngularJS</a></li>-->  
+                            <li><a href="https://gojs.net/latest/samples/basic.html">Basic<span class="samplespan"><img src="tree/basic.png" height="200"></span></a></li>    
+                            <li><a href="https://gojs.net/latest/samples/classHierarchy.html">Class Hierarchy<span class="samplespan"><img src="tree/classHierarchy.png" height="200"></span></a></li>  
+                            <li><a href="https://gojs.net/latest/samples/DOMTree.html">DOM Tree<span class="samplespan"><img src="tree/DOMTree.png" height="200"></span></a></li>    
+                            <li><a href="https://gojs.net/latest/samples/visualTree.html">Visual Tree<span class="samplespan"><img src="tree/visualTree.png" height="200"></span></a></li>    <!--<li><a href="visualTreeGrouping.html">Visual Tree Groups</a></li>-->    
+                            <li><a href="https://gojs.net/latest/samples/shapes.html">Shapes<span class="samplespan"><img src="tree/shapes.png" height="200"></span></a></li>   
+                            <!--<li><a href="tiger.html">SVG Tiger</a></li>-->    <li><a href="https://gojs.net/latest/samples/icons.html">SVG Icons<span class="samplespan"><img src="tree/icons.png" height="200"></span></a></li>  
+                            <li><a href="https://gojs.net/latest/samples/arrowheads.html">Arrowheads<span class="samplespan"><img src="tree/arrowheads.png" height="200"></span></a></li>  
+                            <!--<li><a href="relationships.html">Relationships</a></li>-->    <li><a href="https://gojs.net/latest/samples/navigation.html">Navigation<span class="samplespan"><img src="tree/navigation.png" height="200"></span></a></li>  
+                            <li><a href="https://gojs.net/latest/samples/adornmentButtons.html">Adornment Buttons<span class="samplespan"><img src="tree/adornmentButtons.png" height="200"></span></a></li>   
+                            <!--<li><a href="hoverButtons.html">Hover Buttons</a></li>-->    <hr>    <li><a href="https://gojs.net/latest/samples/familyTree.html">Family Tree<span class="samplespan"><img src="tree/familyTree.png" height="200"></span></a></li>    <!--<li><a href="familyTreeJP.html">Family Tree (Japanese)</a></li>-->   
+                            <li><a href="https://gojs.net/latest/samples/localView.html">Local View<span class="samplespan"><img src="tree/localView.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/decisionTree.html">Decision Tree<span class="samplespan"><img src="tree/decisionTree.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/incrementalTree.html">Incremental Tree<span class="samplespan"><img src="tree/incrementalTree.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/doubleTree.html">Double Tree<span class="samplespan"><img src="tree/doubleTree.png" height="200"></span></a></li>    <!--<li><a href="doubleTreeJSON.html">Double Tree (JSON)</a></li>-->    <li><a href="https://gojs.net/latest/samples/orgChartStatic.html">OrgChart (Static)<span class="samplespan"><img src="tree/orgChartStatic.png" height="200"></span></a></li>    <li><a class="selected" href="https://gojs.net/latest/samples/orgChartEditor.html">OrgChart Editor<span class="samplespan"><img src="tree/orgChartEditor.png" height="200"></span></a></li>    <!--<li><a href="orgChartExtras.html">OrgChart (Extras)</a></li>-->    <li><a href="https://gojs.net/latest/samples/mindMap.html">Mind Map<span class="samplespan"><img src="tree/mindMap.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/tournament.html">Tournament<span class="samplespan"><img src="tree/tournament.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/treeView.html">Tree View<span class="samplespan"><img src="tree/treeView.png" height="200"></span></a></li>    <!--<li><a href="pipeTree.html">Pipe Tree</a></li>-->    <li><a href="https://gojs.net/latest/samples/genogram.html">Genogram<span class="samplespan"><img src="tree/genogram.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/IVRtree.html">IVR Tree<span class="samplespan"><img src="tree/IVRtree.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/parseTree.html">Parse Tree<span class="samplespan"><img src="tree/parseTree.png" height="200"></span></a></li>    <!--<li><a href="faultTree.html">Parse Tree</a></li>-->    <hr>    <li><a href="https://gojs.net/latest/samples/beatPaths.html">Beat Paths<span class="samplespan"><img src="tree/beatPaths.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/conceptMap.html">Concept Map<span class="samplespan"><img src="tree/conceptMap.png" height="200"></span></a></li>    <!--<li><a href="pathAnimation.html">Path Animation</a></li>-->    <li><a href="https://gojs.net/latest/samples/euler.html">Euler Diagram<span class="samplespan"><img src="tree/euler.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/dataVisualization.html">Data Visualization<span class="samplespan"><img src="tree/dataVisualization.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/entityRelationship.html">Entity Relationship<span class="samplespan"><img src="tree/entityRelationship.png" height="200"></span></a></li>    <!--<li><a href="doubleCircle.html">Double Circle</a></li>-->    <li><a href="https://gojs.net/latest/samples/friendWheel.html">Friend Wheel<span class="samplespan"><img src="tree/friendWheel.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/radial.html">Recentering Radial<span class="samplespan"><img src="tree/radial.png" height="200"></span></a></li>    <!--<li><a href="radialPartition.html">Radial Partition</a></li>-->    <li><a href="https://gojs.net/latest/samples/distances.html">Distances and Paths<span class="samplespan"><img src="tree/distances.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/sankey.html">Sankey<span class="samplespan"><img src="tree/sankey.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/PERT.html">PERT<span class="samplespan"><img src="tree/PERT.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/gantt.html">Gantt<span class="samplespan"><img src="tree/gantt.png" height="200"></span></a></li>    <!--<li><a href="timeline.html">Timeline</a></li>-->    <li><a href="https://gojs.net/latest/samples/shopFloorMonitor.html">Shop Floor Monitor<span class="samplespan"><img src="tree/shopFloorMonitor.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/kittenMonitor.html">Kitten Monitor<span class="samplespan"><img src="tree/kittenMonitor.png" height="200"></span></a></li>    <!--<li><a href="constantSize.html">Constant Size</a></li>-->    <!--<li><a href="spacingZoom.html">Spacing Zoom</a></li>-->    <li><a href="https://gojs.net/latest/samples/grouping.html">Grouping<span class="samplespan"><img src="tree/grouping.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/swimBands.html">Layer Bands<span class="samplespan"><img src="tree/swimBands.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/swimLanes.html">Swim Lanes<span class="samplespan"><img src="tree/swimLanes.png" height="200"></span></a></li>    <!--<li><a href="swimLanesVertical.html">Swim Lanes (V)</a></li>-->    <li><a href="https://gojs.net/latest/samples/kanban.html">Kanban Board<span class="samplespan"><img src="tree/kanban.png" height="200"></span></a></li>    <!--<li><a href="spreadsheet.html">Spreadsheet</a></li>-->    <li><a href="https://gojs.net/latest/samples/umlClass.html">UML Class<span class="samplespan"><img src="tree/umlClass.png" height="200"></span></a></li>    <!--<li><a href="virtualized.html">Virtualized no Layout</a></li>-->    <!--<li><a href="virtualizedTree.html">Virtualized Tree</a></li>-->    <!--<li><a href="virtualizedTreeLayout.html">Virtualized TreeLayout</a></li>-->    <!--<li><a href="virtualizedForceLayout.html">Virtualized ForceLayout</a></li>-->    <hr>    <li><a href="https://gojs.net/latest/samples/flowchart.html">Flowchart<span class="samplespan"><img src="tree/flowchart.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/pageFlow.html">Page Flow<span class="samplespan"><img src="tree/pageFlow.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/processFlow.html">Process Flow<span class="samplespan"><img src="tree/processFlow.png" height="200"></span></a></li>    <!--<li><a href="productionProcess.html">Production Process</a></li>-->    <li><a href="https://gojs.net/latest/samples/systemDynamics.html">System Dynamics<span class="samplespan"><img src="tree/systemDynamics.png" height="200"></span></a></li>    <!--<li><a href="flowBuilder.html">Flow Builder</a></li>-->    <!--<li><a href="flowgrammer.html">Flowgrammer</a></li>-->    <!--<li><a href="network.html">Network Config</a></li>-->    <li><a href="https://gojs.net/latest/samples/stateChart.html">State Chart<span class="samplespan"><img src="tree/stateChart.png" height="200"></span></a></li>    <!--<li><a href="stateChartIncremental.html">State Chart using incremental JSON</a></li>-->    <!--<li><a href="sharedStates.html">Shared States</a></li>-->    <li><a href="https://gojs.net/latest/samples/sequentialFunction.html">Sequential Function<span class="samplespan"><img src="tree/sequentialFunction.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/grafcet.html">Grafcet Diagrams<span class="samplespan"><img src="tree/grafcet.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/sequenceDiagram.html">Sequence Diagram<span class="samplespan"><img src="tree/sequenceDiagram.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/logicCircuit.html">Logic Circuit<span class="samplespan"><img src="tree/logicCircuit.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/records.html">Record Mapper<span class="samplespan"><img src="tree/records.png" height="200"></span></a></li>    <!--<li><a href="selectableFields.html">Selectable Fields</a></li>-->    <!--<li><a href="treeMapper.html">Tree Mapper</a></li>-->    <!--<li><a href="addRemoveColumns.html">Add & Remove Columns</a></li>-->    <!--<li><a href="dragDropFields.html">Drag & Drop Fields</a></li>-->    <!--<li><a href="dragOutFields.html">Drag Out Fields</a></li>-->    <li><a href="https://gojs.net/latest/samples/dataFlow.html">Data Flow<span class="samplespan"><img src="tree/dataFlow.png" height="200"></span></a></li>    <!--<li><a href="dataFlowVertical.html">Data Flow (V)</a></li>-->    <li><a href="https://gojs.net/latest/samples/dynamicPorts.html">Dynamic Ports<span class="samplespan"><img src="tree/dynamicPorts.png" height="200"></span></a></li>    <!--<li><a href="selectablePorts.html">Selectable Ports</a></li>-->    <!--<li><a href="draggablePorts.html">Draggable Ports</a></li>-->    <li><a href="https://gojs.net/latest/samples/planogram.html">Planogram<span class="samplespan"><img src="tree/planogram.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/seatingChart.html">Seating Chart<span class="samplespan"><img src="tree/seatingChart.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/regrouping.html">Regrouping<span class="samplespan"><img src="tree/regrouping.png" height="200"></span></a></li>    <!--<li><a href="regroupingScaled.html">Regrouping Scaled</a></li>-->    <!--<li><a href="regroupingTreeView.html">Regrouping with Tree View</a></li>-->    <li><a href="https://gojs.net/latest/samples/pipes.html">Pipes<span class="samplespan"><img src="tree/pipes.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/draggableLink.html">Draggable Link<span class="samplespan"><img src="tree/draggableLink.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/linksToLinks.html">Links to Links<span class="samplespan"><img src="tree/linksToLinks.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/updateDemo.html">Update Demo<span class="samplespan"><img src="tree/updateDemo.png" height="200"></span></a></li>    <!--<li><a href="twoDiagrams.html">Two Diagrams</a></li>-->    <!--<hr />-->    <!--<li><a href="curviness.html">Curviness</a></li>-->    <!--<li><a href="multiNodePathLinks.html">Path Links</a></li>-->    <!--<li><a href="taperedLinks.html">Tapered Links</a></li>-->    <!--<li><a href="multiArrow.html">Multi Arrow</a></li>-->    <!--<li><a href="barCharts.html">Bar Charts</a></li>-->    <!--<li><a href="pieCharts.html">Pie Charts</a></li>-->    <!--<li><a href="candlestickCharts.html">Candlestick Charts</a></li>-->    <!--<li><a href="sparklineGraphs.html">Sparkline Graphs</a></li>-->    <!--<li><a href="dynamicPieChart.html">Dynamic Pie Chart</a></li>-->    <hr>    <li><a href="https://gojs.net/latest/samples/contentAlign.html">Content Alignment<span class="samplespan"><img src="tree/contentAlign.png" height="200"></span></a></li>    <!--<li><a href="absolute.html">Absolute Positioning</a></li>-->    <li><a href="https://gojs.net/latest/samples/htmlInteraction.html">HTML Interaction<span class="samplespan"><img src="tree/htmlInteraction.png" height="200"></span></a></li>    <!--<li><a href="htmlDragDrop.html">HTML Drag and Drop</a></li>-->    <!--<li><a href="jQueryDragDrop.html">jQuery Drag and Drop</a></li>-->    <!--<li><a href="macros.html">Macros via auto ungrouping</a></li>-->    <!--<li><a href="dragUnoccupied.html">Custom Part.dragComputation function to avoid overlapping nodes when dragging</a>-->    <!--<li><a href="customTextEditingTool.html">Text Editing</a></li>-->    <li><a href="https://gojs.net/latest/samples/customContextMenu.html">Context Menu<span class="samplespan"><img src="tree/customContextMenu.png" height="200"></span></a></li>    <!--<li><a href="htmlLightBoxContextMenu.html">LightBox Context</a></li>-->    <!--<li><a href="tabs.html">Tabbed Diagrams</a></li>-->    <li><a href="https://gojs.net/latest/samples/canvases.html">Canvases<span class="samplespan"><img src="tree/canvases.png" height="200"></span></a></li>    <!--<li><a href="magnifier.html">Magnifier</a></li>-->    <li><a href="https://gojs.net/latest/samples/comments.html">Comments<span class="samplespan"><img src="tree/comments.png" height="200"></span></a></li>    <hr>    <li><a href="https://gojs.net/latest/samples/gLayout.html">Grid Layout<span class="samplespan"><img src="tree/gLayout.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/tLayout.html">Tree Layout<span class="samplespan"><img src="tree/tLayout.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/fdLayout.html">Force Directed<span class="samplespan"><img src="tree/fdLayout.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/ldLayout.html">Layered Digraph<span class="samplespan"><img src="tree/ldLayout.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/cLayout.html">Circular Layout<span class="samplespan"><img src="tree/cLayout.png" height="200"></span></a></li>    <li><a href="https://gojs.net/latest/samples/interactiveForce.html">Interactive Force<span class="samplespan"><img src="tree/interactiveForce.png" height="200"></span></a></li>    <hr>    <li><a href="https://gojs.net/latest/extensions/index.html">GoJS Extensions</a></li>    
+                <li><a href="https://gojs.net/latest/samples/unlisted.html">Unlisted Samples<span class="samplespan"><img src="tree/unlisted.png" height="200"></span></a></li>  </ul></div>
+        <div id="sample">
+            <div id="myDiagramDiv" style="background-color: rgb(105, 105, 105); border: 1px solid black; height: 500px; position: relative; cursor: auto;">
+                <canvas height="483" width="1185" style="position: absolute; top: 0px; left: 0px; z-index: 2; -moz-user-select: none; width: 1185px; height: 483px; cursor: auto;" tabindex="0">
+                    This text is displayed if your browser does not support the Canvas HTML element.</canvas>
+                <div style="position: absolute; overflow: auto; width: 1185px; height: 500px; z-index: 1;">
+                    <div style="position: absolute; width: 1291px; height: 1px;"></div>
+
+                </div>
+
+            </div>
+            <div>
+                <div class="inspector" id="myInspector">
+                    <table><tbody><tr><td>key</td><td><input value="16" disabled="disabled" tabindex="0"></td></tr>
+                            <tr><td>comments</td><td><input tabindex="1"></td></tr>
+                            <tr><td>name</td><td><input value="Lotta B. Essen" tabindex="2"></td></tr>
+                            <tr><td>title</td><td><input value="Sales Rep" tabindex="3"></td></tr>
+                            <tr><td>parent</td><td><input value="3" tabindex="4"></td></tr></tbody></table></div>
+            </div>
+            <p>
+                This editable organizational chart sample color-codes the Nodes according to the tree level in the hierarchy.
+            </p>
+            <p>
+                Double click on a node in order to add a person or the diagram 
+                background to add a new boss. Double clicking the diagram uses the <a target="api" href="https://gojs.net/latest/api/symbols/ClickCreatingTool.html">ClickCreatingTool</a>
+                with a custom <a target="api" href="https://gojs.net/latest/api/symbols/ClickCreatingTool.html#insertPart">ClickCreatingTool.insertPart</a> to assign an ID.
+            </p>
+            <p>
+                Drag a node onto another in order to change relationships.
+                You can also draw a link from a node's background to other nodes 
+                that have no "boss". Links can also be relinked to change relationships.
+                Right-click or tap-hold a Node to bring up a context menu which 
+                allows you to:
+            </p><ul>
+                <li>Vacate Position - remove the information specfic to the current person in that role</li>
+                <li>Remove Role - removes the role entirely and reparents any children</li>
+                <li>Remove Department - removes the role and the whole subtree</li>
+            </ul>
+            Deleting a Node or Link will orphan the child Nodes and generate a new tree. A custom SelectionDeleting <a target="api" href="https://gojs.net/latest/api/symbols/DiagramEvent.html">DiagramEvent</a> listener will clear out the boss info
+            when the parent becomes undefined.
+            <p></p>
+            <p>
+                Select a node to edit/update node data values. This sample uses the <a href="https://gojs.net/latest/extensions/dataInspector.html">Data Inspector</a> extension to display and modify Part data.
+            </p>
+            <p>
+                To learn how to build an org chart from scratch with GoJS, see the <a href="https://gojs.net/latest/learn/index.html">Getting Started tutorial</a>.
+            </p>
+            <div>
+                <div>
+                    <button id="SaveButton" onclick="save()">Save</button>
+                    <button onclick="load()">Load</button>
+                    Diagram Model saved in JSON format:
+                </div>
+                <textarea id="mySavedModel" style="width:100%;height:250px">{ "class": "go.TreeModel",
+  "nodeDataArray": [
+{"key":"1", "name":"Stella Payne Diaz", "title":"CEO"},
+{"key":"2", "name":"Luke Warm", "title":"VP Marketing/Sales", "parent":"1"},
+{"key":"3", "name":"Meg Meehan Hoffa", "title":"Sales", "parent":"2"},
+{"key":"4", "name":"Peggy Flaming", "title":"VP Engineering", "parent":"1"},
+{"key":"5", "name":"Saul Wellingood", "title":"Manufacturing", "parent":"4"},
+{"key":"6", "name":"Al Ligori", "title":"Marketing", "parent":"2"},
+{"key":"7", "name":"Dot Stubadd", "title":"Sales Rep", "parent":"3"},
+{"key":"8", "name":"Les Ismore", "title":"Project Mgr", "parent":"5"},
+{"key":"9", "name":"April Lynn Parris", "title":"Events Mgr", "parent":"6"},
+{"key":"10", "name":"Xavier Breath", "title":"Engineering", "parent":"4"},
+{"key":"11", "name":"Anita Hammer", "title":"Process", "parent":"5"},
+{"key":"12", "name":"Billy Aiken", "title":"Software", "parent":"10"},
+{"key":"13", "name":"Stan Wellback", "title":"Testing", "parent":"10"},
+{"key":"14", "name":"Marge Innovera", "title":"Hardware", "parent":"10"},
+{"key":"15", "name":"Evan Elpus", "title":"Quality", "parent":"5"},
+{"key":"16", "name":"Lotta B. Essen", "title":"Sales Rep", "parent":"3"}
+ ]
+}
+                </textarea>
+            </div>
+            <div><p><a href="javascript:goViewSource()">View this sample page's source in-page</a></p><p><a href="https://github.com/NorthwoodsSoftware/GoJS/blob/master/samples/orgChartEditor.html" target="_blank">View this sample page's source on GitHub</a></p></div><div class="footer"><b>GoJS</b>® version 1.6.14 for JavaScript and HTML. Copyright © 1998-2016 by Northwoods Software Corporation.</div></div>
+
+
+        <div style="top: 0px; z-index: 300; position: fixed; display: none; text-align: center; left: 25%; width: 50%; background-color: rgb(245, 245, 245); padding: 16px; border: 16px solid rgb(68, 68, 68); border-radius: 10px; margin-top: 10px;"></div><div style="z-index: 299; position: fixed; display: none; top: 0px; left: 0px; width: 100%; height: 100%; background-color: black; opacity: 0.8;"></div></body></html>
